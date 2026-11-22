@@ -1,0 +1,986 @@
+Developer Handoff Package: Online Product Catalog and Sales Management System
+Nov 18, 2026 · @Omor
+The approved design is sound and buildable, but 8 gaps must be closed before coding starts; this package lists the fixes, then gives backend, database and frontend developers one set of specs and 11 diagrams.
+1. Design review
+Verdict: approve with changes. Nothing needs a redesign; all 31 findings below are additions or clarifications, and the rest of this package already uses the proposed fixes. A fix marked proposed is not approved until you confirm it in section 11.
+What checked out
+Counts match the text: 8 modules, 11 tables, 45 endpoints (auth 7, users 3, products 8, stock 3, customers 5, reports 8, targets 3, dashboards 8).
+Every table has exactly one owning module, and modules touch each other&apos;s data only through service calls.
+Wireframe arithmetic is correct: 35,000 of 50,000 is 70% with 15,000 remaining; 960 + 825 = 1,785; 480 × 2 = 960.
+The state diagrams match the endpoints, and the stock ledger rules are consistent (sale and sale_returned require a report_id).
+Money as NUMERIC, ON DELETE RESTRICT, client submission keys and price snapshots on report lines are sound.
+Findings
+ID
+Severity
+Where
+Gap
+Proposed fix
+F-01
+Blocker
+§1.2, §7
+The single fixed time zone is never named, yet report_date, today and month limits depend on it.
+Config COMPANY_TZ, default Asia/Dhaka (UTC+6, no DST). Confirm.
+F-02
+Blocker
+users, #1, #2
+users.phone is a login identifier but is neither unique nor normalized; two accounts can share it. Only EMAIL_TAKEN exists.
+Normalize like customers (F-11), unique index, add PHONE_TAKEN; an identifier containing @ is an email.
+F-03
+Blocker
+§6.2 steps 3–5
+Price and active checks run before the transaction and stock lock, so a price edit in between saves a report at a stale price.
+Validate inside the transaction: lock stock, then read variants, products and customer FOR SHARE and compare prices.
+F-04
+Blocker
+§6.3, #11
+Only customers have delta sync; price, hide, image and in-stock changes never reach a phone until the next login.
+Add updated_since and server_time to GET /products; touch products.updated_at on variant, image and stock-flip changes. Endpoint count stays 45.
+F-05
+Blocker
+§7, #3, #5, #6
+JWT lifetime, refresh and revocation are undefined; tokens survive a password change or reset.
+12 h access token, no refresh token; add users.password_changed_at and reject tokens issued before it.
+F-06
+Blocker
+§1.2, #28
+Resubmitting must replace line items, which conflicts with never hard-deleted.
+Decide: A = replace items of a rejected report (default; the ledger keeps quantities), B = add report_events (F-14).
+F-07
+Blocker
+#2
+ACCOUNT_PENDING, REJECTED and DISABLED are returned before the password is checked, so anyone can probe which emails or phones exist.
+Check the password first (dummy hash for unknown identifiers); return status errors only after a correct password.
+F-08
+Blocker
+§8, §9
+Only 3 wireframes are in the document (S2, S5, one admin screen), but the checklist lists S1–S6 and A1–A6.
+Supply the rest, or approve the screen inventory in section 9 as the baseline.
+F-09
+Major
+#27, #28
+No upper bound on quantity or total; duplicate variant_id in items hits the unique index and returns a 500.
+quantity 1–100000, grand_total ≤ 999999999999.99, 422 DUPLICATE_ITEM and 422 TOO_MANY_ITEMS.
+F-10
+Major
+#28
+A retried PUT after a timeout returns REPORT_NOT_EDITABLE although the first call worked.
+Return 409 with the current report in details; client treats submitted with equal items as success.
+F-11
+Major
+customers, users
+Normalization only strips spaces and dashes, so 01712345678, 8801712345678 and +8801712345678 count as three numbers.
+Canonical +8801XXXXXXXXX (accept 01…, 8801…, +8801…); other formats 422 unless an E.164 fallback is approved.
+F-12
+Major
+§6.2, #31–33, #21
+Lock order is defined only for submission; reject, reverse, approve and manual adjust can deadlock or race.
+One order everywhere: sales_reports row FOR UPDATE, then stock rows by ascending variant_id (section 8).
+F-13
+Major
+#32
+Bulk approve does not say whether one bad report fails the batch.
+One transaction per report; result {approved: [ids], skipped: [{id, code}]}.
+F-14
+Major
+sales_reports
+Reject, resubmit, reject overwrites reviewed_by, reviewed_at and reject_reason; no decision history.
+Option B of F-06: append-only report_events as a 12th table, or accept the overwrite in writing.
+F-15
+Major
+#10, §6.1
+The status transition matrix is drawn but not listed; effect of disabling on tokens and open reports is silent; re-running create_admin.py is open.
+Matrix in section 2; disabling blocks the next request; reports stay reviewable; the script may add admins.
+F-16
+Major
+dashboards, targets
+The month a report counts toward, and what today means for a late approval, is implicit.
+Count approved reports by report_date in COMPANY_TZ; today means report_date equals today.
+F-17
+Major
+#37, #40
+Progress % rounding, ranking ties and users without a target are undefined.
+Show floor(approved ÷ target × 100), uncapped; rank by exact ratio, then higher approved total, then lower id; skip users with no target.
+F-18
+Major
+§5
+No pagination, sort or list envelope; no generic error codes or HTTP mapping; OUT_OF_STOCK vs STOCK_SHORT not defined.
+Conventions and error catalog in section 2.
+F-19
+Major
+§4.2
+Only customers.name has a trigram index, but product names, customer phones and user names are also searched by substring.
+Add GIN trigram indexes (section 6).
+F-20
+Major
+§6.3
+Customer delta uses page numbers over a changing set, so rows can be skipped; the server_time boundary is not specified.
+Keyset cursor on (updated_at, id); server_time taken before the first page; client upserts idempotently.
+F-21
+Major
+§7
+Backups sit on the same server disk; no off-site copy or restore test.
+Copy off-host nightly, keep 90 days, restore drill each quarter; state RPO 24 h.
+F-22
+Major
+§2, #34
+ReportLab does not shape Bengali conjuncts, so Bangla names in PDFs print wrongly; Excel sanitizing also corrupts numbers starting with +.
+Confirm if Bangla text appears; if yes use a shaping-capable PDF path and an embedded Bangla font. Sanitize text columns only; write phones as strings.
+F-23
+Minor
+stock_movements
+Checks do not force the sign by reason; a sale row could be positive.
+CHECK sale → change &lt; 0, sale_returned → change &gt; 0.
+F-24
+Minor
+#17
+Image rules lack resize method, EXIF rotation, decompression-bomb limit and serving rules.
+Fit inside the square on white, exif_transpose, pixel cap, UUID file names served by Nginx with long cache.
+F-25
+Minor
+§7
+Email is fire-and-forget after commit; a crash or SMTP outage loses it.
+Background task with retries and a failure log; forgot-password always returns the generic 200.
+F-26
+Minor
+§7
+Nightly job could run twice if every app worker schedules it.
+Run it from cron as its own process under a PostgreSQL advisory lock.
+F-27
+Minor
+§6.2
+The 5 s lock wait on a hot variant has no error code or pool sizing at 5,000 users.
+Map lock timeout to 503 STOCK_BUSY; size the DB pool to the worker count.
+F-28
+Minor
+#32, #34
+GET /reports/export and POST /reports/approve collide with /reports/{id}.
+Register static routes first; type id as int.
+F-29
+Minor
+§9
+Vite, Workbox and sync vs async SQLAlchemy appear only in the checklist or nowhere.
+Treat as proposals: Vite, Workbox, SQLAlchemy 2.0 sync with psycopg 3.
+F-30
+Minor
+§1.1
+Visibility and In Stock are undefined for variants of hidden products.
+Visible = product active AND variant active; variant in stock = quantity &gt; 0; product in stock = any visible variant in stock.
+F-31
+Minor
+PWA
+A disabled user&apos;s cached data stays on the phone until it reconnects; token storage is unspecified.
+Accept and document it; token in IndexedDB with a strict CSP; optional wipe after 14 days without an online check.
+2. Locked conventions
+Every team builds to the rules below; they close findings F-01, F-05, F-15 to F-18, F-20 and F-30. Items marked (proposed) need your sign-off in section 11.
+Formats
+Topic
+Rule
+Time zone
+Stored as UTC TIMESTAMPTZ. COMPANY_TZ = Asia/Dhaka (proposed). report_date = the COMPANY_TZ calendar date of first submission; month parameters (YYYY-MM) and today are read in COMPANY_TZ.
+API timestamps
+ISO 8601 in UTC with Z, for example 2026-11-18T04:30:00Z.
+Money
+BDT, NUMERIC in the database, Decimal in Python, 2-decimal strings in JSON (&quot;1500.00&quot;), never floats. The UI shows 1,500.00 BDT with Western grouping as in the wireframes.
+IDs
+BIGINT, sent as JSON numbers. JSON keys are snake_case.
+Phone
+Canonical +8801XXXXXXXXX. Accept 01XXXXXXXXX, 8801XXXXXXXXX and +8801XXXXXXXXX, store the canonical form, reject other input with 422 (proposed). Applies to users and customers.
+Pagination
+page (default 1), page_size (default 50, max 200). List response: {&quot;items&quot;: [], &quot;page&quot;: 1, &quot;page_size&quot;: 50, &quot;total&quot;: 0}.
+Sorting
+sort=field or sort=-field from a per-endpoint allow-list; unknown field is 422.
+Sync lists
+updated_since mode uses a keyset cursor on (updated_at, id), 500 rows a page: {&quot;items&quot;: [], &quot;next_cursor&quot;: null, &quot;server_time&quot;: &quot;…&quot;}. server_time is read before the first page.
+Request tracing
+Every response carries X-Request-ID; the same value appears in error bodies and logs.
+Authentication
+Authorization: Bearer &lt;jwt&gt;. Claims: sub (user id), role, iat, exp = iat + 12 h (proposed). No refresh token; the user logs in again.
+On every protected request: load the user row, require status = active, require iat ≥ users.password_changed_at (new column, proposed). Otherwise 401 UNAUTHENTICATED, or 403 ACCOUNT_DISABLED when the account was disabled.
+Login: verify the password first; only then return ACCOUNT_PENDING, ACCOUNT_REJECTED or ACCOUNT_DISABLED. Unknown identifiers run a dummy hash check and return INVALID_CREDENTIALS. 10 failed attempts a minute per IP and identifier returns 429.
+User status transitions (PATCH /users/{id}/status; any other pair returns 409 INVALID_STATUS_CHANGE)
+From
+To
+Side effects and guards
+pending
+active
+Sends the account-approved email.
+pending
+rejected
+Sends the account-rejected email.
+rejected
+active
+Sends the account-approved email.
+active
+disabled
+Not yourself (CANNOT_DISABLE_SELF); not the last active admin (LAST_ADMIN). Blocks the next request; open reports stay reviewable.
+disabled
+active
+No email.
+Business rules every module shares
+Visible product or variant = product.is_active AND variant.is_active. Reports can only contain visible variants of active customers.
+Variant in_stock = quantity &gt; 0. Product in_stock = any visible variant in stock. Sales users never see quantities.
+Only approved reports count. They count toward the month and day of report_date, not of the approval date.
+Progress % = floor(approved ÷ target × 100), not capped. Remaining = max(target − approved, 0); exceeded = max(approved − target, 0); waiting = sum of submitted reports in that month.
+On resubmission: status = submitted, submitted_at = now, reviewed_by, reviewed_at and reject_reason cleared, report_date unchanged, items replaced (decision A of F-06).
+The password-reset response is always the same generic 200, whether or not the email exists.
+Error catalog (body: {&quot;error&quot;: {&quot;code&quot;, &quot;message&quot;, &quot;fields&quot;, &quot;details&quot;, &quot;request_id&quot;}})
+HTTP
+Codes
+400
+RESET_LINK_INVALID, CURRENT_PASSWORD_WRONG
+401
+UNAUTHENTICATED, INVALID_CREDENTIALS
+403
+FORBIDDEN, ACCOUNT_PENDING, ACCOUNT_REJECTED, ACCOUNT_DISABLED
+404
+NOT_FOUND
+409
+EMAIL_TAKEN, PHONE_TAKEN, PHONE_TAKEN_HIDDEN, PRODUCT_NAME_TAKEN, SIZE_LABEL_TAKEN, CUSTOMER_HIDDEN, ITEM_HIDDEN, OUT_OF_STOCK (quantity 0), STOCK_SHORT (details: available per variant), PRICE_CHANGED (details: current prices), REPORT_NOT_EDITABLE (details: current report), REPORT_STATUS_CONFLICT, STOCK_BELOW_ZERO, INVALID_STATUS_CHANGE, CANNOT_DISABLE_SELF, LAST_ADMIN, IMAGE_LIMIT_REACHED
+413 / 415
+FILE_TOO_LARGE / UNSUPPORTED_IMAGE_TYPE
+422
+VALIDATION_ERROR (fields map), DUPLICATE_ITEM, TOO_MANY_ITEMS, USER_NOT_ELIGIBLE, TOO_MANY_ROWS
+429
+RATE_LIMITED
+500 / 503
+EXPORT_FAILED, INTERNAL_ERROR / STOCK_BUSY (lock timeout; client may retry)
+3. Architecture
+One FastAPI process hosts all eight modules over one PostgreSQL database, so a report save and its stock deduction commit or fail together.
+
+system architecture · 2 clients, 8 modules, 3 services
+Both clients talk only to /api/v1; modules call each other as Python functions inside the same database transaction.
+Module dependencies (service-function calls; no module writes another module&apos;s tables)
+Caller
+Calls
+Why
+All modules
+Accounts
+JWT check, active status, role
+Catalog
+Stock
+Create the stock row at 0 in the same transaction as a new variant
+Sales Reports
+Stock, Catalog, Customers
+Deduct and restore stock, validate variants and live prices, check the customer is active
+Monthly Targets
+Reports, Accounts
+Approved totals, eligible active sales users
+Dashboards
+Reports, Targets, Accounts, Catalog
+Aggregates, pending counts, product summary
+History and Export
+Reports, Customers, Accounts
+Rows for the Excel and PDF files
+Accounts, Stock, Customers
+none
+Leaf modules
+
+deployment topology · 1 host, 2 outside services
+The source names no hosting, so deployment is a proposal: the smallest setup that fits 500 to 5,000 sales users, plus the off-host backup copy from F-21.
+4. Roles and use cases
+Two roles exist, and the report approval loop is the only place they meet: sales users create and resubmit, admins approve or reject.
+
+use cases · 2 actors, 18 use cases
+The two highlighted use cases are the core loop; everything else supports it.
+Permission matrix (enforced by the role claim plus the per-request active-status check)
+Area
+Admin
+Sales User
+Endpoints
+Accounts
+Created by create_admin.py; approve, reject, disable, re-enable users
+Self-register as pending; log in after approval; change or reset own password
+#1 to #10
+Catalog
+Add, edit, hide products and variants; upload up to 5 images; see hidden items
+Browse active products and variants; In Stock or Out of Stock only
+#11 to #18
+Stock
+Exact quantities, full ledger, manual received or adjustment with a note
+No access
+#19 to #21
+Customers
+See all including hidden; add, edit, hide, unhide
+See active only; add; own sales history per customer
+#22 to #26
+Reports
+See all; approve, bulk approve up to 100, reject with reason, reverse approved, export
+Create up to 50 items, online only; edit and resubmit own rejected; own history
+#27 to #34
+Targets
+Set any month for any active sales user
+Read own target and progress
+#35 to #37
+Dashboards
+Company totals, daily series, top 10, product summary, pending counts
+Personal target, today, daily series, last 5 reports
+#38 to #45
+5. Data flow
+Level 0 shows what crosses the system boundary; level 1 shows where each flow lands.
+
+DFD level 0 · 2 roles, 2 outside services
+Only email and backups leave the system; everything else is a request from one of the two roles.
+
+DFD level 1 · 8 processes, 6 data stores
+P1 is the gate: it validates the JWT, loads the user row and checks role and active status before any other process runs. Calls between modules, such as Reports to Stock, are internal service calls and are listed in section 3.
+Data flow dictionary
+Flow
+From to
+Data
+F1
+Sales User to P1 and back
+Registration, credentials, reset request; JWT, profile, status errors
+F2
+Admin to P1 and back
+Login, user status decisions; user lists, pending accounts
+F3
+P1 to SMTP
+Password reset link, account approved, account rejected (the report-rejected email is sent by P5 through the same mail service)
+F4
+P2 and D2
+Products, variants, fixed BDT prices, image metadata; image files on disk
+F5
+P3 and D3
+Quantity per variant, add-only movements
+F6
+P4 and D4
+Customers, normalized phones, updated_since deltas
+F7
+P5 and D5
+Reports and lines with copied name, size and price; status, reviewer, reason
+F8
+P6 and D6
+One target per user per month
+F9
+D1 to D6 to P7 and P8
+Read-only aggregates and export rows
+F10
+System to Backup
+Daily PostgreSQL snapshot and image directory
+6. Database
+PostgreSQL holds 11 tables with BIGINT identity keys, UTC TIMESTAMPTZ audit columns and ON DELETE RESTRICT on every foreign key.
+
+ER diagram · 11 tables, 11 foreign-key links
+The two highlighted tables are the ones every report touches: sales_reports for the sale, stock_movements for the ledger entry.
+Changes against the source schema (all proposed, each tied to a finding)
+users.phone becomes UNIQUE and canonical (F-02, F-11); users gains password_changed_at (F-05).
+Trigram GIN indexes on users.full_name, products.name, customers.name and customers.phone (F-19).
+Sync indexes on products and customers by (updated_at, id), and triggers that touch products.updated_at on variant or image changes (F-04, F-20).
+stock_movements gets sign checks by reason (F-23); sales_reports gets status-consistency checks and a partial index for the approval queue.
+sales_report_items keeps DELETE for the app role, because a resubmission replaces the lines (F-06, option A). If you choose option B, add report_events and drop this exception.
+Migration order: 1 extension and roles; 2 users; 3 password_resets; 4 products; 5 product_variants; 6 product_images; 7 stock; 8 customers; 9 sales_reports; 10 sales_report_items; 11 stock_movements; 12 monthly_targets; 13 triggers and grants.
+Full DDL
+CREATE EXTENSION IF NOT EXISTS pg_trgm;CREATE TABLE users (  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,  full_name TEXT NOT NULL,  email TEXT NOT NULL,  phone TEXT NOT NULL,                       -- canonical +8801XXXXXXXXX  password_hash TEXT NOT NULL,               -- Argon2id  password_changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),   -- proposed, F-05  role TEXT NOT NULL CHECK (role IN (&apos;admin&apos;,&apos;sales&apos;)),  status TEXT NOT NULL DEFAULT &apos;pending&apos;    CHECK (status IN (&apos;pending&apos;,&apos;active&apos;,&apos;rejected&apos;,&apos;disabled&apos;)),  status_changed_by BIGINT REFERENCES users(id) ON DELETE RESTRICT,  status_changed_at TIMESTAMPTZ,  created_at TIMESTAMPTZ NOT NULL DEFAULT now());CREATE UNIQUE INDEX ux_users_email ON users (LOWER(email));CREATE UNIQUE INDEX ux_users_phone ON users (phone);       -- proposed: was a plain index, F-02CREATE INDEX ix_users_status_created ON users (status, created_at);CREATE INDEX ix_users_name_trgm ON users USING gin (full_name gin_trgm_ops);CREATE TABLE password_resets (  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,  token_hash TEXT NOT NULL UNIQUE,           -- SHA-256 of the emailed token  expires_at TIMESTAMPTZ NOT NULL,  used_at TIMESTAMPTZ,  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),  CHECK (expires_at &gt; created_at));CREATE INDEX ix_password_resets_user ON password_resets (user_id);CREATE TABLE products (  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,  name TEXT NOT NULL,  is_active BOOLEAN NOT NULL DEFAULT TRUE,  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),  updated_by BIGINT REFERENCES users(id) ON DELETE RESTRICT);CREATE UNIQUE INDEX ux_products_name ON products (LOWER(name));CREATE INDEX ix_products_active_name ON products (is_active, name);CREATE INDEX ix_products_name_trgm ON products USING gin (name gin_trgm_ops);CREATE INDEX ix_products_sync ON products (updated_at, id);          -- proposed, F-04CREATE TABLE product_variants (  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,  product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE RESTRICT,  size_label TEXT NOT NULL,  price NUMERIC(12,2) NOT NULL CHECK (price &gt; 0),  is_active BOOLEAN NOT NULL DEFAULT TRUE,  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),  updated_at TIMESTAMPTZ NOT NULL DEFAULT now());CREATE UNIQUE INDEX ux_variants_product_size ON product_variants (product_id, LOWER(size_label));CREATE TABLE product_images (  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,  product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE RESTRICT,  thumb_path TEXT NOT NULL UNIQUE,  normal_path TEXT NOT NULL,  created_at TIMESTAMPTZ NOT NULL DEFAULT now());CREATE INDEX ix_images_product ON product_images (product_id, id);  -- lowest id = coverCREATE TABLE stock (  variant_id BIGINT PRIMARY KEY REFERENCES product_variants(id) ON DELETE RESTRICT,  quantity INTEGER NOT NULL DEFAULT 0 CHECK (quantity &gt;= 0),  updated_at TIMESTAMPTZ NOT NULL DEFAULT now());CREATE TABLE customers (  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,  name TEXT NOT NULL,  phone TEXT NOT NULL UNIQUE,                -- canonical +8801XXXXXXXXX  is_active BOOLEAN NOT NULL DEFAULT TRUE,  created_by BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),  updated_at TIMESTAMPTZ NOT NULL DEFAULT now());CREATE INDEX ix_customers_name_trgm ON customers USING gin (name gin_trgm_ops);CREATE INDEX ix_customers_phone_trgm ON customers USING gin (phone gin_trgm_ops);CREATE INDEX ix_customers_sync ON customers (updated_at, id);CREATE TABLE sales_reports (  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,         -- the Report #  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,  customer_id BIGINT NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,  report_date DATE NOT NULL,                                  -- COMPANY_TZ date of first submission, never changes  status TEXT NOT NULL DEFAULT &apos;submitted&apos;    CHECK (status IN (&apos;submitted&apos;,&apos;approved&apos;,&apos;rejected&apos;)),  grand_total NUMERIC(14,2) NOT NULL CHECK (grand_total &gt; 0),  submission_key TEXT NOT NULL,  submitted_at TIMESTAMPTZ NOT NULL DEFAULT now(),  reviewed_by BIGINT REFERENCES users(id) ON DELETE RESTRICT,  reviewed_at TIMESTAMPTZ,  reject_reason TEXT,  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),  UNIQUE (user_id, submission_key),  CHECK ((status = &apos;submitted&apos;) = (reviewed_by IS NULL)),     -- proposed  CHECK ((status = &apos;rejected&apos;) = (reject_reason IS NOT NULL)) -- proposed);CREATE INDEX ix_reports_user_date_status ON sales_reports (user_id, report_date, status);CREATE INDEX ix_reports_status_date ON sales_reports (status, report_date);CREATE INDEX ix_reports_customer_user_date ON sales_reports (customer_id, user_id, report_date);CREATE INDEX ix_reports_queue ON sales_reports (submitted_at) WHERE status = &apos;submitted&apos;;  -- proposedCREATE TABLE sales_report_items (  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,  report_id BIGINT NOT NULL REFERENCES sales_reports(id) ON DELETE RESTRICT,  variant_id BIGINT NOT NULL REFERENCES product_variants(id) ON DELETE RESTRICT,  product_name TEXT NOT NULL,                -- copied at submission  size_label TEXT NOT NULL,                  -- copied at submission  quantity INTEGER NOT NULL CHECK (quantity BETWEEN 1 AND 100000),   -- upper bound proposed, F-09  unit_price NUMERIC(12,2) NOT NULL CHECK (unit_price &gt; 0),  line_total NUMERIC(14,2) NOT NULL,  UNIQUE (report_id, variant_id),  CHECK (line_total = quantity * unit_price));CREATE INDEX ix_report_items_variant ON sales_report_items (variant_id);CREATE TABLE stock_movements (  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,  variant_id BIGINT NOT NULL REFERENCES product_variants(id) ON DELETE RESTRICT,  change INTEGER NOT NULL CHECK (change &lt;&gt; 0),  reason TEXT NOT NULL CHECK (reason IN (&apos;received&apos;,&apos;adjustment&apos;,&apos;sale&apos;,&apos;sale_returned&apos;)),  note TEXT,  report_id BIGINT REFERENCES sales_reports(id) ON DELETE RESTRICT,  created_by BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),  CHECK (reason NOT IN (&apos;received&apos;,&apos;adjustment&apos;)         OR (note IS NOT NULL AND btrim(note) &lt;&gt; &apos;&apos; AND report_id IS NULL)),  CHECK (reason NOT IN (&apos;sale&apos;,&apos;sale_returned&apos;) OR report_id IS NOT NULL),  CHECK (reason &lt;&gt; &apos;sale&apos; OR change &lt; 0),            -- proposed, F-23  CHECK (reason &lt;&gt; &apos;sale_returned&apos; OR change &gt; 0)    -- proposed, F-23);CREATE INDEX ix_movements_variant_created ON stock_movements (variant_id, created_at DESC, id DESC);CREATE INDEX ix_movements_report ON stock_movements (report_id) WHERE report_id IS NOT NULL;CREATE TABLE monthly_targets (  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,  month DATE NOT NULL CHECK (EXTRACT(DAY FROM month) = 1),  target_amount NUMERIC(12,2) NOT NULL CHECK (target_amount &gt; 0),  set_by BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),  UNIQUE (user_id, month));CREATE INDEX ix_targets_month ON monthly_targets (month);-- Catalog sync (F-04): any variant or image change touches the parent productCREATE FUNCTION touch_product() RETURNS trigger AS $$BEGIN  UPDATE products SET updated_at = now()   WHERE id = CASE TG_OP WHEN &apos;DELETE&apos; THEN OLD.product_id ELSE NEW.product_id END;  RETURN NULL;END $$ LANGUAGE plpgsql;CREATE TRIGGER trg_variants_touch AFTER INSERT OR UPDATE OR DELETE ON product_variants  FOR EACH ROW EXECUTE FUNCTION touch_product();CREATE TRIGGER trg_images_touch AFTER INSERT OR DELETE ON product_images  FOR EACH ROW EXECUTE FUNCTION touch_product();-- The Stock service also touches products.updated_at when a quantity crosses 0 in either direction.-- Roles: migrations run as app_owner, the API connects as app_userGRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user;REVOKE DELETE ON users, products, product_variants, customers, sales_reports,              stock, monthly_targets FROM app_user;REVOKE UPDATE, DELETE, TRUNCATE ON stock_movements FROM app_user;   -- immutable ledger-- Nightly audit 1: report totals vs lines (expect zero rows)SELECT r.id FROM sales_reports r JOIN sales_report_items i ON i.report_id = r.idGROUP BY r.id, r.grand_total HAVING SUM(i.line_total) &lt;&gt; r.grand_total;-- Nightly audit 2: stock vs ledger (expect zero rows)SELECT s.variant_id FROM stock s LEFT JOIN stock_movements m USING (variant_id)GROUP BY s.variant_id, s.quantity HAVING s.quantity &lt;&gt; COALESCE(SUM(m.change), 0);
+7. API catalog
+All 45 endpoints live under /api/v1 and follow the conventions in section 2; frontend and backend can both build from this list and the shapes below. Access: Public, Auth (any logged-in active user), Admin, Sales, Owner (the report&apos;s creator).
+Accounts (#1 to #10)
+#
+Method and path
+Access
+Input
+Success and errors
+1
+POST /auth/register
+Public
+full_name, email, phone, password (at least 8)
+201 user with status pending; EMAIL_TAKEN, PHONE_TAKEN, 422
+2
+POST /auth/login
+Public
+identifier (email or phone), password
+200 token and user; INVALID_CREDENTIALS, ACCOUNT_PENDING, ACCOUNT_REJECTED, ACCOUNT_DISABLED, 429
+3
+POST /auth/logout
+Auth
+none
+204; the client clears the token and offline cache
+4
+POST /auth/forgot-password
+Public
+email
+Generic 200 always; 429
+5
+POST /auth/reset-password
+Public
+token, new_password
+200; RESET_LINK_INVALID, 422
+6
+POST /auth/change-password
+Auth
+current_password, new_password
+200; CURRENT_PASSWORD_WRONG, 422
+7
+GET /auth/me
+Auth
+none
+200 user
+8
+GET /users
+Admin
+status, search, page, page_size, sort
+200 paged users
+9
+GET /users/{id}
+Admin
+none
+200 user; 404
+10
+PATCH /users/{id}/status
+Admin
+status: active, rejected or disabled
+200 user; INVALID_STATUS_CHANGE, CANNOT_DISABLE_SELF, LAST_ADMIN
+Catalog and stock (#11 to #21)
+#
+Method and path
+Access
+Input
+Success and errors
+11
+GET /products
+Auth
+search, include_hidden (Admin), updated_since (new, F-04), page, page_size, sort
+200 paged products with visible variants and in_stock; sync mode adds server_time and next_cursor
+12
+GET /products/{id}
+Auth
+none
+200 product with images and variants; 404
+13
+POST /products
+Admin
+name
+201; PRODUCT_NAME_TAKEN, 422
+14
+PATCH /products/{id}
+Admin
+name, is_active
+200; PRODUCT_NAME_TAKEN, 404
+15
+POST /products/{id}/variants
+Admin
+size_label, price
+201 and a stock row at 0; SIZE_LABEL_TAKEN
+16
+PATCH /variants/{id}
+Admin
+size_label, price, is_active
+200; SIZE_LABEL_TAKEN, 404
+17
+POST /products/{id}/images
+Admin
+multipart file, 5 MB max, 5 per product
+201 with WebP URLs; IMAGE_LIMIT_REACHED, FILE_TOO_LARGE, UNSUPPORTED_IMAGE_TYPE
+18
+DELETE /products/{id}/images/{image_id}
+Admin
+none
+204; 404
+19
+GET /stock
+Admin
+search, page, page_size, sort
+200 paged StockRow
+20
+GET /stock/{variant_id}/movements
+Admin
+page, page_size
+200 ledger, newest first
+21
+POST /stock/{variant_id}/adjust
+Admin
+change (non-zero integer), reason (received or adjustment), note (required)
+200 StockRow and movement; STOCK_BELOW_ZERO, 422
+Customers and reports (#22 to #34)
+#
+Method and path
+Access
+Input
+Success and errors
+22
+GET /customers
+Auth
+search, include_hidden (Admin), updated_since, page, page_size, sort
+200 list; sync mode returns cursor and server_time, hidden rows as {id, is_active: false}
+23
+GET /customers/{id}
+Auth
+none
+200; 404
+24
+POST /customers
+Auth
+name, phone
+201; PHONE_TAKEN, PHONE_TAKEN_HIDDEN
+25
+PATCH /customers/{id}
+Admin
+name, phone, is_active
+200; PHONE_TAKEN, 404
+26
+GET /customers/{id}/history
+Auth
+page, page_size
+200 approved summary and report list (Sales sees own only)
+27
+POST /reports
+Sales
+submission_key, customer_id, items [variant_id, quantity, unit_price]
+201, or 200 for a repeated key; CUSTOMER_HIDDEN, ITEM_HIDDEN, OUT_OF_STOCK, PRICE_CHANGED, STOCK_SHORT, DUPLICATE_ITEM, TOO_MANY_ITEMS, STOCK_BUSY
+28
+PUT /reports/{id}
+Owner
+customer_id, items (rejected reports only)
+200 submitted; REPORT_NOT_EDITABLE, plus the errors of #27
+29
+GET /reports
+Auth
+status, user_id (Admin), customer_id, from, to, page, page_size, sort
+200 paged ReportSummary; Sales sees own only
+30
+GET /reports/{id}
+Owner, Admin
+none
+200 full report; 404
+31
+POST /reports/{id}/approve
+Admin
+none
+200 approved; REPORT_STATUS_CONFLICT, 404
+32
+POST /reports/approve
+Admin
+report_ids (max 100)
+200 {approved: [ids], skipped: [{id, code}]}
+33
+POST /reports/{id}/reject
+Admin
+reason (required); works on submitted or approved
+200 rejected, stock restored, owner emailed; REPORT_STATUS_CONFLICT
+34
+GET /reports/export
+Admin
+format (pdf or xlsx), from and to (required, at most 1 year), status, user_id, customer_id
+200 file stream; TOO_MANY_ROWS (over 5,000), EXPORT_FAILED, 422
+Targets and dashboards (#35 to #45)
+#
+Method and path
+Access
+Input
+Success and errors
+35
+PUT /targets
+Admin
+user_id, month (YYYY-MM), target_amount
+201 created or 200 updated; USER_NOT_ELIGIBLE, 422
+36
+GET /targets
+Admin
+month, search, has_target, sort, page, page_size
+200 users with TargetNumbers
+37
+GET /targets/me
+Sales
+month (default current)
+200 TargetNumbers and waiting_amount
+38
+GET /dashboard/admin/summary
+Admin
+month
+approved_total, approved_count, today_total, today_count
+39
+GET /dashboard/admin/daily
+Admin
+month
+One total per day, 0 for empty days
+40
+GET /dashboard/admin/top-users
+Admin
+month
+Top 10 by exact percent of target
+41
+GET /dashboard/admin/products
+Admin
+month
+Variant sales and product subtotals
+42
+GET /dashboard/admin/pending
+Admin
+none
+reports_waiting, accounts_waiting (all months)
+43
+GET /dashboard/me
+Sales
+month
+TargetNumbers, waiting_amount, today totals
+44
+GET /dashboard/me/daily
+Sales
+month
+Own daily totals
+45
+GET /dashboard/me/recent
+Sales
+none
+rejected_count and last 5 reports
+Response shapes (money as 2-decimal strings, timestamps as in section 2)
+Shape
+Fields
+User
+id, full_name, email, phone, role, status, created_at
+Product
+id, name, is_active, updated_at, cover_thumb_url, variants [id, size_label, price, is_active, in_stock]; detail adds images [id, thumb_url, normal_url]
+Customer
+id, name, phone, is_active, created_at, updated_at
+StockRow
+variant_id, product_name, size_label, quantity, updated_at
+Movement
+id, change, reason, note, report_id, created_by_name, created_at
+ReportSummary
+id, report_date, status, grand_total, customer_name, user_name, item_count, submitted_at
+Report
+ReportSummary fields plus user {id, full_name}, customer {id, name, phone}, reviewed_by, reviewed_at, reject_reason, items [variant_id, product_name, size_label, quantity, unit_price, line_total]
+TargetNumbers
+month, target_amount, approved_total, remaining, exceeded, progress_pct (integer), waiting_amount
+Examples
+Submit a report (#27). The client generates submission_key once per draft and reuses it on every retry.
+POST /api/v1/reports{ &quot;submission_key&quot;: &quot;6f1c2a9e-3b7d-4c55-9a10-2d8e5f6a7b01&quot;,  &quot;customer_id&quot;: 31,  &quot;items&quot;: [ { &quot;variant_id&quot;: 12, &quot;quantity&quot;: 2, &quot;unit_price&quot;: &quot;480.00&quot; },             { &quot;variant_id&quot;: 40, &quot;quantity&quot;: 5, &quot;unit_price&quot;: &quot;165.00&quot; } ] }201 { &quot;id&quot;: 1048, &quot;status&quot;: &quot;submitted&quot;, &quot;report_date&quot;: &quot;2026-11-18&quot;,      &quot;grand_total&quot;: &quot;1785.00&quot;, &quot;items&quot;: [ ... ] }
+Price changed (nothing saved, submission_key still unused):
+409 { &quot;error&quot;: { &quot;code&quot;: &quot;PRICE_CHANGED&quot;, &quot;message&quot;: &quot;Prices changed. Review the current prices.&quot;,        &quot;fields&quot;: {}, &quot;details&quot;: { &quot;items&quot;: [ { &quot;variant_id&quot;: 12, &quot;unit_price&quot;: &quot;495.00&quot; } ] },        &quot;request_id&quot;: &quot;c1f3b0e2&quot; } }
+Customer delta sync (#22):
+GET /api/v1/customers?updated_since=2026-11-18T04:30:00Z200 { &quot;items&quot;: [ { &quot;id&quot;: 31, &quot;name&quot;: &quot;Rahim Store&quot;, &quot;phone&quot;: &quot;+8801712345678&quot;, &quot;is_active&quot;: true, &quot;updated_at&quot;: &quot;...&quot; },                 { &quot;id&quot;: 17, &quot;is_active&quot;: false } ],      &quot;next_cursor&quot;: null, &quot;server_time&quot;: &quot;2026-11-18T05:10:00Z&quot; }
+Target numbers (#37, #43):
+{ &quot;month&quot;: &quot;2026-11&quot;, &quot;target_amount&quot;: &quot;50000.00&quot;, &quot;approved_total&quot;: &quot;35000.00&quot;,  &quot;remaining&quot;: &quot;15000.00&quot;, &quot;exceeded&quot;: &quot;0.00&quot;, &quot;progress_pct&quot;: 70, &quot;waiting_amount&quot;: &quot;4200.00&quot; }
+8. Backend
+The backend is eight modules under /backend/app/modules/, each with router, schemas, service and repository files; routers never touch another module&apos;s tables, they call its service functions.
+State machines
+
+user account states · 4 states, 5 transitions
+A pending or rejected account cannot log in; disabling takes effect on the account&apos;s next request because status is read on every call.
+
+sales report states · 3 states, 5 transitions
+Approval changes nothing in stock. Reject, reverse and resubmit are the only moves that do, and each runs in one transaction.
+Submission sequence
+
+sequence · POST /reports, 4 participants, 8 messages
+The same order of work is used for PUT /reports/{id}, minus the idempotency lookup. Step 3 comes before the reads in step 4 so that a price or visibility check can never be stale (F-03).
+Service functions each module exposes
+Module
+Functions other modules may call
+Accounts
+get_active_user, authenticate, issue_token, register, set_status, request_reset, reset_password, change_password
+Catalog
+list_products, get_product, create_product, update_product, add_variant (also creates stock at 0), update_variant, add_image, delete_image, snapshot_variants(ids) returning name, size, price and visibility
+Stock
+lock_rows(variant_ids), deduct(items, report_id, actor), restore(items, report_id, actor), adjust(variant_id, change, reason, note, actor), list_stock, list_movements
+Customers
+list_or_sync, get, create (normalizes phone), update, set_active, is_active(id)
+Sales Reports
+submit, resubmit, approve, bulk_approve, reject (also used for reversal), list, get, rows_for_export
+Monthly Targets
+upsert_target, numbers_for(user, month), list_numbers
+Dashboards
+admin_summary, admin_daily, top_users, product_breakdown, pending, me_summary, me_daily, me_recent
+History and Export
+stream_xlsx, stream_pdf
+Transaction recipes. Lock order everywhere: the sales_reports row first, then stock rows by ascending variant_id. Never take them in another order.
+Submit (#27): find (user_id, submission_key), return 200 if found; BEGIN with lock_timeout 5 s; lock stock rows; read customer, variants and products FOR SHARE and check visibility and prices; check quantities; update stock; insert movements (sale, negative); insert report with report_date = today in COMPANY_TZ, and items with copied name, size and price; compute line and grand totals on the server; COMMIT.
+Resubmit (#28): lock the report row, require status rejected and the caller as owner; delete its items; then repeat steps 2 to 6 of the submit recipe; set status submitted, submitted_at = now, clear reviewed_by, reviewed_at and reject_reason; keep report_date and submission_key.
+Approve (#31): lock the report row; require submitted; set approved, reviewed_by, reviewed_at. No stock change.
+Bulk approve (#32): sort ids; run recipe 3 per report in its own transaction; collect skipped ids with their code.
+Reject or reverse (#33): lock the report row; require submitted or approved; lock stock rows ascending; restore quantities; insert sale_returned movements (positive); set rejected, reviewer, time and reason; COMMIT; then send the report-rejected email.
+Adjust stock (#21): lock the stock row; require quantity + change at least 0, else STOCK_BELOW_ZERO; update; insert a movement with the note.
+Add variant (#15): insert the variant and its stock row at 0 in one transaction.
+Set user status (#10): lock the user row; check the transition table in section 2 and the self and last-admin guards (count active admins FOR UPDATE); update; send the email after commit.
+Background jobs
+Job
+Schedule
+What it does
+If it fails
+Email sender
+After each commit
+Sends the 4 event emails from a background task, 3 tries with growing delay
+Logs at error level with request_id; never blocks the API
+Nightly maintenance
+Daily, cron, advisory lock
+Deletes expired or used password_resets; runs the two audit queries in section 6
+Logs critical and emails the admin; never rewrites data
+Backup
+Daily, cron
+pg_dump plus a copy of the image directory, then an off-host copy; delete copies older than 90 days
+Logs critical and emails the admin
+Security checklist
+Passwords: Argon2id; the reset token is random, emailed once and stored only as a SHA-256 hash; 1 hour expiry, single use.
+Rate limits: login 10 failed attempts a minute (key: IP plus identifier); forgot-password and register also limited.
+CORS allows only the app origin; HTTPS only with HSTS; a strict Content-Security-Policy on the PWA; no third-party scripts.
+Uploads: Pillow verifies the file, applies EXIF rotation, caps pixel count, fits inside the square on white, writes WebP under UUID names, discards the original.
+Exports: sanitize text cells that start with =, +, -, @, tab or carriage return; write phone numbers as strings (F-22).
+Data access: SQLAlchemy parameters only, no string-built SQL; DB role limits as in section 6; no personal data in logs.
+9. Frontend
+One React and Tailwind codebase ships two apps: a mobile-first PWA for sales users and a desktop admin panel, both built with Vite and talking only to /api/v1.
+
+screen map · 6 sales screens, 9 admin screens
+The source wireframes show only S2, S5 and the approval queue (F-08); this screen set is derived from the navigation in those wireframes and the 45 endpoints, and is the baseline until the other wireframes arrive.
+Screen inventory
+Screen
+Role
+Endpoints
+Rules
+S1 Sign in, register, reset
+Public
+#1 to #5
+Identifier accepts email or phone; pending, rejected and disabled show the matching message; reset link opens a new-password form
+S2 Home
+Sales
+#43, #45, #37
+Target card with month picker, approved, remaining, waiting, progress bar; today&apos;s approved; alert with rejected count and a Fix link; last 5 reports
+S3 Catalog
+Sales
+#11, #12
+Search by name; cover thumbnail; variants with price and In Stock or Out of Stock only; works offline from the cache
+S4 Customers
+Sales
+#22 to #24, #26
+Search by name or phone, offline; add customer online; own sales history per customer
+S5 New report
+Sales
+#22, #11, #27
+Single screen: customer, line items (max 50), grand total, submit; online only; draft lost when the app closes
+S6 Reports
+Sales
+#29, #30, #28
+List with status chips; detail shows reject reason; rejected reports open in S5 to edit and resubmit
+Dashboard
+Admin
+#38 to #42
+Month picker; totals, daily series, top 10 by percent of target, product summary, pending counts
+Approvals
+Admin
+#8, #10, #29 to #33
+Tabs for pending accounts and submitted reports; row checkboxes; floating bar with Bulk Approve (max 100); review modal with Approve and Reject (reason required)
+Catalog
+Admin
+#11 to #18
+Products, variants and prices, hide or show, up to 5 images with delete
+Stock
+Admin
+#19 to #21
+Exact quantities; add received or adjustment with a required note; ledger per variant
+Customers
+Admin
+#22 to #26
+All including hidden; add, edit, hide or unhide
+Reports
+Admin
+#29, #30, #33, #34
+Filters by status, user, customer, dates; reverse approved with reason; export to Excel or PDF (date range required, 1 year max)
+Targets
+Admin
+#35, #36
+Month picker; per-user target with set or edit
+Users
+Admin
+#8 to #10
+Search and filter by status; approve, reject, disable, re-enable
+
+offline sync flow · 7 steps, 1 decision
+Offline PWA contract
+Cached for offline reading: the active catalog with 200 by 200 thumbnails and the active customer list. Nothing else works offline, and S5 is disabled with a clear message.
+Store catalog and customers in IndexedDB and thumbnails in CacheStorage (Workbox). Show a last-synced time next to In Stock, because stock status is only as fresh as the last sync (F-04).
+Sync on login (full), on every app open and on reconnect (delta). Customer deltas return hidden rows as {id, is_active: false}; remove them locally. Follow next_cursor until null and save server_time only after the last page.
+Wipe everything on logout and on 403 ACCOUNT_DISABLED, and clear the token on 401.
+Optional: wipe after 14 days with no successful online check (F-31, open question 8).
+Report builder rules
+Create a submission_key (UUID v4) when the draft starts. Keep it across retries; make a new one only for a new draft.
+Take unit_price from the cached catalog and show it read-only. On 409 PRICE_CHANGED, replace the prices from details, show the change and let the user submit again with the same key.
+Limits: 50 distinct variants, quantity 1 to 100000 per line, no duplicate variants (add to the existing line instead).
+Totals on screen are for display; the server&apos;s totals win.
+Disable the submit button while a request is in flight. On a network timeout, retry with the same key; on STOCK_SHORT or OUT_OF_STOCK, show the available quantity from details.
+For a rejected report, open S5 with its items and show the reject reason on top; resubmitting calls PUT, and a REPORT_NOT_EDITABLE reply carrying an equal report counts as success (F-10).
+Client architecture and UI rules
+Server state with TanStack Query; routes with React Router; forms validated against the same limits as the API; the error envelope maps fields to inputs, and request_id is shown as a reference in error toasts.
+API client: adds the Bearer token, sends X-Request-ID, handles 401 and 403 as above, formats money from strings without float math.
+Layout: sales screens designed for 360 px wide phones with 44 px touch targets and a bottom bar of Home, Catalog, New report, Reports; admin screens for desktop with a left sidebar and sticky table headers.
+Every list has loading, empty and error states. Status chips: submitted, approved, rejected. Destructive actions (reject, reverse, disable) ask for confirmation.
+10. Delivery
+Three tracks (database, backend, frontend) can start on day one because the schema, the API catalog and the screen set are fixed in this package; the milestones below say when each track hands over.
+Repository layout
+/backend  app/main.py                 FastAPI app, routers mounted under /api/v1  app/core/                   config, db session, security, errors, request id, rate limit  app/modules/accounts, catalog, stock, customers, reports, targets, dashboards, export      each with router.py, schemas.py, service.py, repository.py  app/jobs/                   nightly.py, backup.py, email.py  alembic/                    migrations in the order of section 6  scripts/create_admin.py     seeds an active admin; may be run again to add admins  tests//frontend  src/apps/sales/             S1 to S6  src/apps/admin/             admin screens  src/shared/                 api client, money, phone, offline store, sync, UI kit  public/                     manifest, icons, Workbox service worker config/deploy                       nginx.conf, cron entries, example .env
+Configuration (environment variables)
+Variable
+Meaning
+Default
+DATABASE_URL
+PostgreSQL connection for app_user
+none
+JWT_SECRET, JWT_TTL_HOURS
+Signing key and token lifetime
+none, 12
+COMPANY_TZ
+IANA zone for report_date, today and months
+Asia/Dhaka
+SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, MAIL_FROM
+Email provider
+none
+APP_BASE_URL
+Used in reset links
+none
+ALLOWED_ORIGIN
+CORS origin of the PWA
+none
+MEDIA_DIR, BACKUP_DIR, OFFHOST_BACKUP_TARGET
+Image and backup locations
+none
+LOCK_TIMEOUT_MS
+Row-lock wait
+5000
+Stack: approved and proposed
+Layer
+Approved
+Proposed addition
+Frontend
+React JS, Tailwind CSS, PWA
+Vite, React Router, TanStack Query, Workbox, idb for IndexedDB
+Backend
+FastAPI, Pydantic
+Python 3.12, Uvicorn workers behind Nginx, pydantic-settings
+Data access
+SQLAlchemy, Alembic
+SQLAlchemy 2.0 sync with psycopg 3, pool sized to the worker count
+Database
+PostgreSQL with pg_trgm
+PostgreSQL 16
+Files and exports
+Pillow, XlsxWriter, ReportLab
+A shaping-capable PDF path if Bangla text is needed (F-22)
+Passwords
+bcrypt or Argon2
+Argon2id
+Quality
+none stated
+pytest with httpx, Vitest, Playwright, Ruff, GitHub Actions
+Milestones
+#
+Database
+Backend
+Frontend
+Done when
+M0
+Extension, roles, empty migrations
+Scaffold, config, errors, request id, auth dependency
+Vite apps, API client, UI kit
+CI green on an empty app
+M1
+users, password_resets
+Accounts #1 to #10, create_admin.py, emails
+S1, Users, Approvals (accounts tab)
+A user registers, is approved and logs in
+M2
+Catalog and stock tables, triggers
+Catalog #11 to #18, Stock #19 to #21
+Admin Catalog and Stock, S3
+Admin builds a priced, stocked catalog
+M3
+customers
+Customers #22 to #26
+S4, Admin Customers
+Phone duplicates are caught in every format
+M4
+Reports tables, ledger rules
+Reports #27 to #33 with locks and idempotency
+S5, S6, Approvals (reports tab)
+The test list below passes for submit, approve and reject
+M5
+monthly_targets
+Targets #35 to #37, Dashboards #38 to #45
+S2, Dashboard, Targets
+Numbers match hand-checked data
+M6
+none
+Export #34, nightly and backup jobs
+Reports screen, export
+5,000-row export works; audits run clean
+M7
+none
+Hardening: rate limits, load test
+PWA offline and sync, install prompt
+5,000-user load test and offline checks pass
+Tests that must exist before release
+Check
+Expected result
+Two users submit for the last unit at once
+Exactly one succeeds; the other gets STOCK_SHORT; stock is 0
+Same submission_key sent twice
+One report; stock deducted once; second call returns 200
+Price changed after the client loaded it
+409 PRICE_CHANGED; key still usable
+Reject and reverse
+Exact quantities restored; ledger sum equals stock
+Resubmit after midnight
+report_date unchanged; stock deducted again
+Approved totals
+Submitted and rejected reports never count; reversal removes the amount
+Update or delete on stock_movements as app_user
+Permission denied
+01712345678, 8801712345678 and +8801712345678
+Same canonical phone; second insert returns PHONE_TAKEN
+Disabled user&apos;s next request
+403 ACCOUNT_DISABLED
+Token issued before a password change
+401 UNAUTHENTICATED
+Login with a pending account and a wrong password
+INVALID_CREDENTIALS, not ACCOUNT_PENDING
+Bulk approve with 3 valid ids and 1 already rejected
+3 approved, 1 skipped with REPORT_STATUS_CONFLICT
+Export of 5,001 rows; a customer name starting with an equals sign
+TOO_MANY_ROWS; the cell is sanitized
+Customer hidden, then delta sync
+The phone removes the record
+5,000-user load test on one hot variant
+No deadlocks; lock waits end in 503 STOCK_BUSY, never in a hang
+Definition of done for each endpoint: documented in OpenAPI exactly as in section 7; role and active-status checks tested; error codes from the catalog only; an Alembic migration if the schema changed; the frontend screen using it works against the real API.
+11. Open questions
+Every item has a default already used in this package, so work can start; each default is cheap to change before the code that depends on it is written.
+#
+Decision
+Default used here
+Affects
+1
+Company time zone
+Asia/Dhaka
+Every date rule, dashboards
+2
+Phone formats
+Bangladesh mobile canonical +8801XXXXXXXXX; other input rejected
+Users, customers, sync
+3
+Token lifetime and revocation
+12 h, no refresh, password_changed_at check
+Auth, PWA login
+4
+Report history
+Option A: replace lines, overwrite review fields
+Schema, reports, audit
+5
+Bangla text in customer or product names, and in PDFs
+Assumed not needed
+PDF export stack
+6
+Missing wireframes S1, S3, S4, S6 and the admin screens
+Screen set in section 9
+Frontend
+7
+Hosting and off-host backup target
+One Linux host plus an off-host copy
+Operations
+8
+Maximum offline age before the cache is wiped
+None (optional 14 days)
+PWA
+9
+Product delta sync (updated_since on #11)
+Added
+API, PWA
+10
+Money grouping: Western or lakh style
+Western, as in the wireframes
+All screens
