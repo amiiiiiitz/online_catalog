@@ -5,14 +5,9 @@ import SalesCatalog from './pages/SalesCatalog';
 import SalesCustomers from './pages/SalesCustomers';
 import SalesNewReport from './pages/SalesNewReport';
 import SalesReports from './pages/SalesReports';
-
-function Page({ title }: { title: string }) {
-  return (
-    <div style={{ padding: 'var(--space-6)' }}>
-      <h1 style={{ fontSize: 'var(--text-page-title-size)', fontWeight: 'var(--text-page-title-weight)' }}>{title}</h1>
-    </div>
-  );
-}
+import AdminLayout from './pages/admin/AdminLayout';
+import Dashboard from './pages/admin/Dashboard';
+import AdminPlaceholder from './pages/admin/AdminPlaceholder';
 
 export default function App() {
   return (
@@ -26,14 +21,16 @@ export default function App() {
         <Route path="/sales/customers" element={<SalesCustomers />} />
         <Route path="/sales/new-report" element={<SalesNewReport />} />
         <Route path="/sales/reports" element={<SalesReports />} />
-        <Route path="/admin" element={<Page title="Admin Dashboard" />} />
-        <Route path="/admin/approvals" element={<Page title="Approvals" />} />
-        <Route path="/admin/catalog" element={<Page title="Admin Catalog" />} />
-        <Route path="/admin/stock" element={<Page title="Stock" />} />
-        <Route path="/admin/customers" element={<Page title="Admin Customers" />} />
-        <Route path="/admin/reports" element={<Page title="Admin Reports" />} />
-        <Route path="/admin/targets" element={<Page title="Targets" />} />
-        <Route path="/admin/users" element={<Page title="Users" />} />
+        <Route path="/admin" element={<AdminLayout />}>
+          <Route index element={<Dashboard />} />
+          <Route path="approvals" element={<AdminPlaceholder section="Approvals" />} />
+          <Route path="catalog" element={<AdminPlaceholder section="Catalog" />} />
+          <Route path="stock" element={<AdminPlaceholder section="Stock" />} />
+          <Route path="customers" element={<AdminPlaceholder section="Customers" />} />
+          <Route path="reports" element={<AdminPlaceholder section="Reports" />} />
+          <Route path="targets" element={<AdminPlaceholder section="Targets" />} />
+          <Route path="users" element={<AdminPlaceholder section="Users" />} />
+        </Route>
       </Routes>
     </BrowserRouter>
   );
